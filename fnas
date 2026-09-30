@@ -1089,6 +1089,21 @@ local LockOnSmooth = 0.35
 local WallCheckEnabled = false
 local LockOnTarget = nil
 local LockOnConnection = nil
+local IgnoreUsername = ""
+
+-- Username exclusion: the lock-on will never select this player.
+local function IsIgnoredPlayer(OtherPlayer)
+	if not OtherPlayer then
+		return false
+	end
+
+	local wanted = string.lower((IgnoreUsername or ""):gsub("^%s+", ""):gsub("%s+$", ""))
+	if wanted == "" then
+		return false
+	end
+
+	return string.lower(OtherPlayer.Name) == wanted
+end
 
 local function HasLineOfSight(fromPos, toPos, targetCharacter)
 	local params = RaycastParams.new()
@@ -1111,6 +1126,10 @@ end
 
 local function IsValidTarget(OtherPlayer)
 	if not OtherPlayer or OtherPlayer == Player then
+		return false
+	end
+
+	if IsIgnoredPlayer(OtherPlayer) then
 		return false
 	end
 	if not OtherPlayer.Parent or not OtherPlayer.Character then
@@ -1300,6 +1319,72 @@ WallCheckToggle = Auto:CreateToggle(
 		QueueSave()
 	end
 )
+
+--==================================================
+-- IGNORE PLAYER
+--==================================================
+
+local IgnorePlayerHolder = Instance.new("Frame")
+IgnorePlayerHolder.Name = "IgnorePlayerHolder"
+IgnorePlayerHolder.Size = UDim2.new(1, 0, 0, 58)
+IgnorePlayerHolder.BackgroundColor3 = Color3.fromRGB(45, 18, 70)
+IgnorePlayerHolder.BorderSizePixel = 0
+IgnorePlayerHolder.LayoutOrder = 12
+IgnorePlayerHolder.ZIndex = 5
+IgnorePlayerHolder.Parent = Auto.Page
+
+Instance.new("UICorner", IgnorePlayerHolder).CornerRadius = UDim.new(0, 6)
+
+local IgnorePlayerStroke = Instance.new("UIStroke")
+IgnorePlayerStroke.Color = Color3.fromRGB(120, 60, 180)
+IgnorePlayerStroke.Thickness = 1
+IgnorePlayerStroke.Transparency = 0.45
+IgnorePlayerStroke.Parent = IgnorePlayerHolder
+
+local IgnorePlayerLabel = Instance.new("TextLabel")
+IgnorePlayerLabel.Size = UDim2.new(1, -118, 0, 22)
+IgnorePlayerLabel.Position = UDim2.new(0, 12, 0, 4)
+IgnorePlayerLabel.BackgroundTransparency = 1
+IgnorePlayerLabel.Text = "Ignore Username"
+IgnorePlayerLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+IgnorePlayerLabel.TextSize = 12
+IgnorePlayerLabel.Font = Enum.Font.GothamSemibold
+IgnorePlayerLabel.TextXAlignment = Enum.TextXAlignment.Left
+IgnorePlayerLabel.ZIndex = 6
+IgnorePlayerLabel.Parent = IgnorePlayerHolder
+
+local IgnoreUsernameBox = Instance.new("TextBox")
+IgnoreUsernameBox.Name = "IgnoreUsernameBox"
+IgnoreUsernameBox.Size = UDim2.new(0, 96, 0, 28)
+IgnoreUsernameBox.Position = UDim2.new(1, -106, 0.5, -14)
+IgnoreUsernameBox.BackgroundColor3 = Color3.fromRGB(55, 25, 85)
+IgnoreUsernameBox.BorderSizePixel = 0
+IgnoreUsernameBox.ClearTextOnFocus = false
+IgnoreUsernameBox.Text = ""
+IgnoreUsernameBox.PlaceholderText = "Username"
+IgnoreUsernameBox.PlaceholderColor3 = Color3.fromRGB(170, 145, 195)
+IgnoreUsernameBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+IgnoreUsernameBox.TextSize = 10
+IgnoreUsernameBox.Font = Enum.Font.GothamSemibold
+IgnoreUsernameBox.TextXAlignment = Enum.TextXAlignment.Center
+IgnoreUsernameBox.ZIndex = 7
+IgnoreUsernameBox.Parent = IgnorePlayerHolder
+
+Instance.new("UICorner", IgnoreUsernameBox).CornerRadius = UDim.new(0, 5)
+
+IgnoreUsernameBox.FocusLost:Connect(function()
+	IgnoreUsername = IgnoreUsernameBox.Text:gsub("^%s+", ""):gsub("%s+$", "")
+	IgnoreUsernameBox.Text = IgnoreUsername
+
+	-- If the ignored player was currently selected, immediately retarget.
+	if LockOnEnabled then
+		if LockOnTarget and IsIgnoredPlayer(LockOnTarget) then
+			LockOnTarget = GetBestTarget()
+		end
+	end
+
+	QueueSave()
+end)
 
 --==================================================
 -- ESP TAB
@@ -1864,6 +1949,7 @@ local function CollectSettings()
 		lockOnRadius = LockOnRadius,
 		lockOnSmooth = LockOnSmooth,
 		wallCheckEnabled = WallCheckEnabled,
+		ignoreUsername = IgnoreUsername,
 		espEnabled = ESPEnabled,
 		outlineThickness = OutlineThickness,
 		espBrightness = ESPBrightness,
@@ -1962,6 +2048,13 @@ local function ApplySettings(data)
 		WallCheckToggle:SetState(true)
 	elseif data.wallCheckEnabled == false and WallCheckToggle then
 		WallCheckToggle:SetState(false)
+	end
+
+	if type(data.ignoreUsername) == "string" then
+		IgnoreUsername = data.ignoreUsername
+		if IgnoreUsernameBox then
+			IgnoreUsernameBox.Text = IgnoreUsername
+		end
 	end
 	if data.lockOnEnabled == true and LockOnToggle then
 		LockOnToggle:SetState(true)

@@ -990,89 +990,314 @@ Walkspeed:CreateSection("Walk Speed")
 
 local CurrentWalkSpeed = 16
 local WalkSpeedEnabled = false
-local WalkSpeedHeartbeat = nil
+local WalkSpeedRenderConnection = nil
 local WalkSpeedCharConnection = nil
+local WalkSpeedOriginal = nil
 
-local function ApplyWalkSpeed()
-	local Character = Player.Character
-	local Humanoid = Character and Character:FindFirstChildOfClass("Humanoid")
-	if Humanoid then
-		Humanoid.WalkSpeed = CurrentWalkSpeed
-	end
+local function GetWalkHumanoid()
+    local Character = Player.Character
+    return Character and Character:FindFirstChildOfClass("Humanoid")
 end
 
-local function ResetWalkSpeed()
-	local Character = Player.Character
-	local Humanoid = Character and Character:FindFirstChildOfClass("Humanoid")
-	if Humanoid then
-		Humanoid.WalkSpeed = 16
-	end
+-- Walkspeed acts as a minimum: it never lowers the game's current speed.
+local function ApplyWalkSpeed()
+    local Humanoid = GetWalkHumanoid()
+    if Humanoid and Humanoid.WalkSpeed < CurrentWalkSpeed then
+        Humanoid.WalkSpeed = CurrentWalkSpeed
+    end
 end
 
 local function StopWalkSpeed()
-	WalkSpeedEnabled = false
-	if WalkSpeedHeartbeat then
-		WalkSpeedHeartbeat:Disconnect()
-		WalkSpeedHeartbeat = nil
-	end
-	ResetWalkSpeed()
+    WalkSpeedEnabled = false
+
+    if WalkSpeedRenderConnection then
+        WalkSpeedRenderConnection:Disconnect()
+        WalkSpeedRenderConnection = nil
+    end
+
+    local Humanoid = GetWalkHumanoid()
+    if Humanoid and WalkSpeedOriginal ~= nil then
+        Humanoid.WalkSpeed = WalkSpeedOriginal
+    end
+
+    WalkSpeedOriginal = nil
 end
 
 local function StartWalkSpeed()
-	StopWalkSpeed()
-	WalkSpeedEnabled = true
-	ApplyWalkSpeed()
+    StopWalkSpeed()
 
-	WalkSpeedHeartbeat = RunService.Heartbeat:Connect(function()
-		if not WalkSpeedEnabled then
-			return
-		end
-		local Character = Player.Character
-		local Humanoid = Character and Character:FindFirstChildOfClass("Humanoid")
-		if Humanoid and Humanoid.WalkSpeed ~= CurrentWalkSpeed then
-			Humanoid.WalkSpeed = CurrentWalkSpeed
-		end
-	end)
+    local Humanoid = GetWalkHumanoid()
+    if Humanoid then
+        WalkSpeedOriginal = Humanoid.WalkSpeed
+    end
+
+    WalkSpeedEnabled = true
+    ApplyWalkSpeed()
+
+    WalkSpeedRenderConnection = RunService.RenderStepped:Connect(function()
+        if WalkSpeedEnabled then
+            ApplyWalkSpeed()
+        end
+    end)
 end
 
 if WalkSpeedCharConnection then
-	WalkSpeedCharConnection:Disconnect()
+    WalkSpeedCharConnection:Disconnect()
 end
 
 WalkSpeedCharConnection = Player.CharacterAdded:Connect(function(Character)
-	local Humanoid = Character:WaitForChild("Humanoid", 5)
-	if Humanoid and WalkSpeedEnabled then
-		task.wait(0.15)
-		Humanoid.WalkSpeed = CurrentWalkSpeed
-	end
+    local Humanoid = Character:WaitForChild("Humanoid", 5)
+    if Humanoid and WalkSpeedEnabled then
+        WalkSpeedOriginal = Humanoid.WalkSpeed
+        task.wait(0.15)
+        ApplyWalkSpeed()
+    end
 end)
 
 WalkspeedToggle = Walkspeed:CreateToggle(
-	"Enable Walkspeed",
-	false,
-	function(Value)
-		if Value then
-			StartWalkSpeed()
-		else
-			StopWalkSpeed()
-		end
-		QueueSave()
-	end
+    "Enable Walkspeed",
+    false,
+    function(Value)
+        if Value then
+            StartWalkSpeed()
+        else
+            StopWalkSpeed()
+        end
+        QueueSave()
+    end
 )
 
 WalkspeedSlider = Walkspeed:CreateSlider(
-	"Walkspeed",
-	1,
-	50,
-	16,
-	0.1,
-	function(Value)
-		CurrentWalkSpeed = Value
-		if WalkSpeedEnabled then
-			ApplyWalkSpeed()
-		end
-		QueueSave()
-	end
+    "Walkspeed",
+    1,
+    50,
+    16,
+    0.1,
+    function(Value)
+        CurrentWalkSpeed = Value
+        if WalkSpeedEnabled then
+            ApplyWalkSpeed()
+        end
+        QueueSave()
+    end
+)
+
+
+--==================================================
+-- INFINITE STAMINA
+--==================================================
+
+local InfiniteStaminaEnabled = false
+local InfiniteStaminaConnection = nil
+local InfiniteStaminaTables = {}
+
+local STAMINA_KEYS = {
+    "Stamina", "stamina", "CurrentStamina", "currentStamina",
+    "SprintStamina", "sprintStamina", "Energy", "energy",
+    "CurrentEnergy", "currentEnergy", "SprintEnergy", "sprintEnergy"
+}
+
+local MAX_STAMINA_KEYS = {
+    "MaxStamina", "maxStamina", "MaximumStamina", "maximumStamina",
+    "MaxEnergy", "maxEnergy", "MaximumEnergy", "maximumEnergy"
+}
+
+local function FindStaminaValue()
+    local Character = Player.Character
+    local Humanoid = Character and Character:FindFirstChildOfClass("Humanoid")
+    local Containers = {Character, Humanoid, Player, Player:FindFirstChild("leaderstats")}
+
+    for _, Container in ipairs(Containers) do
+        if Container then
+            for _, Name in ipairs(STAMINA_KEYS) do
+                local Value = Container:FindFirstChild(Name, true)
+                if Value and (Value:IsA("NumberValue") or Value:IsA("IntValue")) then
+                    return Value
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
+local function FindStaminaAttribute()
+    local Character = Player.Character
+    local Humanoid = Character and Character:FindFirstChildOfClass("Humanoid")
+    local Containers = {Character, Humanoid, Player}
+
+    for _, Container in ipairs(Containers) do
+        if Container then
+            for _, Name in ipairs(STAMINA_KEYS) do
+                local Value = Container:GetAttribute(Name)
+                if type(Value) == "number" then
+                    return Container, Name, Value
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
+local function SetNumberTableValue(tbl, key)
+    if type(tbl) ~= "table" then return false end
+    local current = rawget(tbl, key)
+    if type(current) ~= "number" then return false end
+
+    local maxValue
+    for _, maxKey in ipairs(MAX_STAMINA_KEYS) do
+        local candidate = rawget(tbl, maxKey)
+        if type(candidate) == "number" and candidate > 0 then
+            maxValue = candidate
+            break
+        end
+    end
+
+    local target = maxValue or math.max(current, 100)
+
+    local ok = pcall(function()
+        rawset(tbl, key, target)
+    end)
+    if ok then
+        return true
+    end
+
+    local setReadonly = rawget(_G, "setreadonly") or setreadonly
+    if setReadonly then
+        local changed = pcall(function()
+            setReadonly(tbl, false)
+            rawset(tbl, key, target)
+            setReadonly(tbl, true)
+        end)
+        return changed
+    end
+
+    return false
+end
+
+local function FindRuntimeStaminaTables()
+    table.clear(InfiniteStaminaTables)
+
+    local getgcFn = rawget(_G, "getgc") or getgc
+    if type(getgcFn) ~= "function" then
+        return
+    end
+
+    local ok, objects = pcall(function()
+        return getgcFn(true)
+    end)
+    if not ok or type(objects) ~= "table" then
+        return
+    end
+
+    for _, object in ipairs(objects) do
+        if type(object) == "table" then
+            local found = false
+            for _, key in ipairs(STAMINA_KEYS) do
+                if type(rawget(object, key)) == "number" then
+                    found = true
+                    break
+                end
+            end
+            if found then
+                table.insert(InfiniteStaminaTables, object)
+            end
+        end
+    end
+end
+
+local function ApplyInfiniteStamina()
+    local changed = false
+
+    local Value = FindStaminaValue()
+    if Value then
+        local maxValue
+        for _, Name in ipairs(MAX_STAMINA_KEYS) do
+            local candidate = Value.Parent:FindFirstChild(Name, true)
+            if candidate and (candidate:IsA("NumberValue") or candidate:IsA("IntValue")) then
+                maxValue = candidate.Value
+                break
+            end
+            local attr = Value.Parent:GetAttribute(Name)
+            if type(attr) == "number" then
+                maxValue = attr
+                break
+            end
+        end
+        Value.Value = maxValue or math.max(Value.Value, 100)
+        changed = true
+    end
+
+    local Container, Name, Current = FindStaminaAttribute()
+    if Container and Name then
+        local maxValue
+        for _, MaxName in ipairs(MAX_STAMINA_KEYS) do
+            local attr = Container:GetAttribute(MaxName)
+            if type(attr) == "number" then
+                maxValue = attr
+                break
+            end
+        end
+        Container:SetAttribute(Name, maxValue or math.max(Current, 100))
+        changed = true
+    end
+
+    -- Some versions of Fight in a School keep stamina in a client module table
+    -- instead of an Instance/Attribute. Refresh the table list periodically.
+    if #InfiniteStaminaTables == 0 then
+        FindRuntimeStaminaTables()
+    end
+
+    for _, tbl in ipairs(InfiniteStaminaTables) do
+        for _, key in ipairs(STAMINA_KEYS) do
+            if SetNumberTableValue(tbl, key) then
+                changed = true
+            end
+        end
+    end
+
+    return changed
+end
+
+local function StopInfiniteStamina()
+    InfiniteStaminaEnabled = false
+    if InfiniteStaminaConnection then
+        InfiniteStaminaConnection:Disconnect()
+        InfiniteStaminaConnection = nil
+    end
+    table.clear(InfiniteStaminaTables)
+end
+
+local function StartInfiniteStamina()
+    StopInfiniteStamina()
+    InfiniteStaminaEnabled = true
+    FindRuntimeStaminaTables()
+    ApplyInfiniteStamina()
+
+    local elapsed = 0
+    InfiniteStaminaConnection = RunService.Heartbeat:Connect(function(dt)
+        if not InfiniteStaminaEnabled then return end
+        elapsed += dt
+
+        if elapsed >= 0.10 then
+            elapsed = 0
+            ApplyInfiniteStamina()
+        end
+    end)
+end
+
+InfiniteStaminaToggle = Walkspeed:CreateToggle(
+    "Infinite Stamina",
+    false,
+    function(Value)
+        if Value then
+            StartInfiniteStamina()
+        else
+            StopInfiniteStamina()
+        end
+        QueueSave()
+    end
 )
 
 --==================================================
@@ -1089,20 +1314,31 @@ local LockOnSmooth = 0.35
 local WallCheckEnabled = false
 local LockOnTarget = nil
 local LockOnConnection = nil
-local IgnoreUsername = ""
+local TeamCheckEnabled = false
 
--- Username exclusion: the lock-on will never select this player.
+-- Multiple username exclusions.
+local IgnoredUsernames = {}
+
+local function NormalizeUsername(Name)
+	return string.lower(tostring(Name or ""):gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
 local function IsIgnoredPlayer(OtherPlayer)
 	if not OtherPlayer then
 		return false
 	end
 
-	local wanted = string.lower((IgnoreUsername or ""):gsub("^%s+", ""):gsub("%s+$", ""))
-	if wanted == "" then
-		return false
-	end
+	local wanted = NormalizeUsername(OtherPlayer.Name)
+	return wanted ~= "" and IgnoredUsernames[wanted] == true
+end
 
-	return string.lower(OtherPlayer.Name) == wanted
+local function GetIgnoredUsernameList()
+	local List = {}
+	for Name, _ in pairs(IgnoredUsernames) do
+		table.insert(List, Name)
+	end
+	table.sort(List)
+	return List
 end
 
 local function HasLineOfSight(fromPos, toPos, targetCharacter)
@@ -1132,6 +1368,12 @@ local function IsValidTarget(OtherPlayer)
 	if IsIgnoredPlayer(OtherPlayer) then
 		return false
 	end
+
+	-- Team Check: do not lock onto teammates.
+	if TeamCheckEnabled and Player.Team ~= nil and OtherPlayer.Team == Player.Team then
+		return false
+	end
+
 	if not OtherPlayer.Parent or not OtherPlayer.Character then
 		return false
 	end
@@ -1321,12 +1563,12 @@ WallCheckToggle = Auto:CreateToggle(
 )
 
 --==================================================
--- IGNORE PLAYER
+-- IGNORE PLAYERS
 --==================================================
 
 local IgnorePlayerHolder = Instance.new("Frame")
 IgnorePlayerHolder.Name = "IgnorePlayerHolder"
-IgnorePlayerHolder.Size = UDim2.new(1, 0, 0, 58)
+IgnorePlayerHolder.Size = UDim2.new(1, 0, 0, 180)
 IgnorePlayerHolder.BackgroundColor3 = Color3.fromRGB(45, 18, 70)
 IgnorePlayerHolder.BorderSizePixel = 0
 IgnorePlayerHolder.LayoutOrder = 12
@@ -1342,10 +1584,10 @@ IgnorePlayerStroke.Transparency = 0.45
 IgnorePlayerStroke.Parent = IgnorePlayerHolder
 
 local IgnorePlayerLabel = Instance.new("TextLabel")
-IgnorePlayerLabel.Size = UDim2.new(1, -118, 0, 22)
+IgnorePlayerLabel.Size = UDim2.new(1, -24, 0, 22)
 IgnorePlayerLabel.Position = UDim2.new(0, 12, 0, 4)
 IgnorePlayerLabel.BackgroundTransparency = 1
-IgnorePlayerLabel.Text = "Ignore Username"
+IgnorePlayerLabel.Text = "Ignore Players"
 IgnorePlayerLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
 IgnorePlayerLabel.TextSize = 12
 IgnorePlayerLabel.Font = Enum.Font.GothamSemibold
@@ -1355,8 +1597,8 @@ IgnorePlayerLabel.Parent = IgnorePlayerHolder
 
 local IgnoreUsernameBox = Instance.new("TextBox")
 IgnoreUsernameBox.Name = "IgnoreUsernameBox"
-IgnoreUsernameBox.Size = UDim2.new(0, 96, 0, 28)
-IgnoreUsernameBox.Position = UDim2.new(1, -106, 0.5, -14)
+IgnoreUsernameBox.Size = UDim2.new(1, -104, 0, 28)
+IgnoreUsernameBox.Position = UDim2.new(0, 12, 0, 31)
 IgnoreUsernameBox.BackgroundColor3 = Color3.fromRGB(55, 25, 85)
 IgnoreUsernameBox.BorderSizePixel = 0
 IgnoreUsernameBox.ClearTextOnFocus = false
@@ -1372,19 +1614,142 @@ IgnoreUsernameBox.Parent = IgnorePlayerHolder
 
 Instance.new("UICorner", IgnoreUsernameBox).CornerRadius = UDim.new(0, 5)
 
-IgnoreUsernameBox.FocusLost:Connect(function()
-	IgnoreUsername = IgnoreUsernameBox.Text:gsub("^%s+", ""):gsub("%s+$", "")
-	IgnoreUsernameBox.Text = IgnoreUsername
+local IgnoreAddButton = Instance.new("TextButton")
+IgnoreAddButton.Name = "IgnoreAddButton"
+IgnoreAddButton.Size = UDim2.new(0, 78, 0, 28)
+IgnoreAddButton.Position = UDim2.new(1, -90, 0, 31)
+IgnoreAddButton.BackgroundColor3 = Color3.fromRGB(160, 80, 255)
+IgnoreAddButton.BorderSizePixel = 0
+IgnoreAddButton.Text = "Add"
+IgnoreAddButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+IgnoreAddButton.TextSize = 11
+IgnoreAddButton.Font = Enum.Font.GothamBold
+IgnoreAddButton.AutoButtonColor = false
+IgnoreAddButton.ZIndex = 7
+IgnoreAddButton.Parent = IgnorePlayerHolder
 
-	-- If the ignored player was currently selected, immediately retarget.
-	if LockOnEnabled then
-		if LockOnTarget and IsIgnoredPlayer(LockOnTarget) then
-			LockOnTarget = GetBestTarget()
+Instance.new("UICorner", IgnoreAddButton).CornerRadius = UDim.new(0, 5)
+
+local IgnoreList = Instance.new("ScrollingFrame")
+IgnoreList.Name = "IgnoreList"
+IgnoreList.Size = UDim2.new(1, -24, 0, 105)
+IgnoreList.Position = UDim2.new(0, 12, 0, 66)
+IgnoreList.BackgroundColor3 = Color3.fromRGB(35, 14, 55)
+IgnoreList.BorderSizePixel = 0
+IgnoreList.ScrollBarThickness = 3
+IgnoreList.ScrollBarImageColor3 = Color3.fromRGB(160, 80, 255)
+IgnoreList.AutomaticCanvasSize = Enum.AutomaticSize.Y
+IgnoreList.CanvasSize = UDim2.new(0, 0, 0, 0)
+IgnoreList.ZIndex = 6
+IgnoreList.Parent = IgnorePlayerHolder
+
+Instance.new("UICorner", IgnoreList).CornerRadius = UDim.new(0, 5)
+
+local IgnoreListLayout = Instance.new("UIListLayout")
+IgnoreListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+IgnoreListLayout.Padding = UDim.new(0, 3)
+IgnoreListLayout.Parent = IgnoreList
+
+local IgnoreEmptyLabel = Instance.new("TextLabel")
+IgnoreEmptyLabel.Size = UDim2.new(1, -10, 0, 24)
+IgnoreEmptyLabel.BackgroundTransparency = 1
+IgnoreEmptyLabel.Text = "No players listed"
+IgnoreEmptyLabel.TextColor3 = Color3.fromRGB(170, 145, 195)
+IgnoreEmptyLabel.TextSize = 10
+IgnoreEmptyLabel.Font = Enum.Font.Gotham
+IgnoreEmptyLabel.ZIndex = 7
+IgnoreEmptyLabel.Parent = IgnoreList
+
+local function RefreshIgnoredPlayerList()
+	for _, Child in ipairs(IgnoreList:GetChildren()) do
+		if Child ~= IgnoreListLayout and Child ~= IgnoreEmptyLabel then
+			Child:Destroy()
 		end
 	end
 
+	local Names = GetIgnoredUsernameList()
+	IgnoreEmptyLabel.Visible = #Names == 0
+
+	for Index, Name in ipairs(Names) do
+		local Row = Instance.new("Frame")
+		Row.Name = "Ignored_" .. Name
+		Row.Size = UDim2.new(1, -6, 0, 27)
+		Row.BackgroundColor3 = Color3.fromRGB(50, 20, 75)
+		Row.BorderSizePixel = 0
+		Row.LayoutOrder = Index
+		Row.ZIndex = 7
+		Row.Parent = IgnoreList
+
+		Instance.new("UICorner", Row).CornerRadius = UDim.new(0, 4)
+
+		local NameLabel = Instance.new("TextLabel")
+		NameLabel.Size = UDim2.new(1, -62, 1, 0)
+		NameLabel.Position = UDim2.new(0, 8, 0, 0)
+		NameLabel.BackgroundTransparency = 1
+		NameLabel.Text = Name
+		NameLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+		NameLabel.TextSize = 10
+		NameLabel.Font = Enum.Font.GothamSemibold
+		NameLabel.TextXAlignment = Enum.TextXAlignment.Left
+		NameLabel.TextTruncate = Enum.TextTruncate.AtEnd
+		NameLabel.ZIndex = 8
+		NameLabel.Parent = Row
+
+		local RemoveButton = Instance.new("TextButton")
+		RemoveButton.Size = UDim2.new(0, 48, 0, 21)
+		RemoveButton.Position = UDim2.new(1, -54, 0.5, -10)
+		RemoveButton.BackgroundColor3 = Color3.fromRGB(120, 45, 70)
+		RemoveButton.BorderSizePixel = 0
+		RemoveButton.Text = "Remove"
+		RemoveButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+		RemoveButton.TextSize = 8
+		RemoveButton.Font = Enum.Font.GothamBold
+		RemoveButton.AutoButtonColor = false
+		RemoveButton.ZIndex = 8
+		RemoveButton.Parent = Row
+
+		Instance.new("UICorner", RemoveButton).CornerRadius = UDim.new(0, 4)
+
+		RemoveButton.MouseButton1Click:Connect(function()
+			IgnoredUsernames[NormalizeUsername(Name)] = nil
+			if LockOnEnabled and LockOnTarget and LockOnTarget.Name == Name then
+				LockOnTarget = GetBestTarget()
+			end
+			RefreshIgnoredPlayerList()
+			QueueSave()
+		end)
+	end
+end
+
+local function AddIgnoredUsername(Name)
+	local CleanName = tostring(Name or ""):gsub("^%s+", ""):gsub("%s+$", "")
+	local Key = NormalizeUsername(CleanName)
+	if Key == "" then
+		return
+	end
+
+	IgnoredUsernames[Key] = true
+	IgnoreUsernameBox.Text = ""
+	RefreshIgnoredPlayerList()
+
+	if LockOnEnabled and LockOnTarget and IsIgnoredPlayer(LockOnTarget) then
+		LockOnTarget = GetBestTarget()
+	end
+
 	QueueSave()
+end
+
+IgnoreAddButton.MouseButton1Click:Connect(function()
+	AddIgnoredUsername(IgnoreUsernameBox.Text)
 end)
+
+IgnoreUsernameBox.FocusLost:Connect(function(EnterPressed)
+	if EnterPressed then
+		AddIgnoredUsername(IgnoreUsernameBox.Text)
+	end
+end)
+
+RefreshIgnoredPlayerList()
 
 --==================================================
 -- ESP TAB
@@ -1430,6 +1795,169 @@ local function GetESPColor()
 	return Color3.new(r, g, b)
 end
 
+local TEAM_BLUE = Color3.fromRGB(70, 150, 255)
+local TEAM_ORANGE = Color3.fromRGB(255, 145, 45)
+
+-- Party detection is intentionally separate from Team Check.
+-- The game may expose party membership through a player attribute or a StringValue.
+-- If no party identifier exists, the player keeps the normal ESP color instead of
+-- being incorrectly treated as a party member.
+-- Manual party fallback. If the game does not replicate its party state,
+-- these names can still be marked orange by adding them to this table at runtime.
+local OrangePartyNames = {}
+
+local function NormalizePartyName(name)
+    return string.lower(tostring(name or ""):gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local function GetPartyId(OtherPlayer)
+    if not OtherPlayer then
+        return nil
+    end
+
+    local attributeNames = {
+        "PartyId", "PartyID", "partyId", "partyID", "Party", "party",
+        "PartyCode", "PartyKey", "PartyGroup", "PartyNumber", "SquadId", "SquadID",
+        "TeamId", "TeamID", "teamId", "teamID"
+    }
+
+    for _, attributeName in ipairs(attributeNames) do
+        local value = OtherPlayer:GetAttribute(attributeName)
+        if value ~= nil and tostring(value) ~= "" then
+            return tostring(value)
+        end
+    end
+
+    for _, valueName in ipairs(attributeNames) do
+        local valueObject = OtherPlayer:FindFirstChild(valueName, true)
+        if valueObject and (valueObject:IsA("StringValue") or valueObject:IsA("IntValue") or valueObject:IsA("NumberValue") or valueObject:IsA("ObjectValue")) then
+            if valueObject:IsA("ObjectValue") then
+                if valueObject.Value then
+                    return valueObject.Value
+                end
+            elseif tostring(valueObject.Value) ~= "" then
+                return tostring(valueObject.Value)
+            end
+        end
+    end
+
+    for _, obj in ipairs(OtherPlayer:GetDescendants()) do
+        local n = string.lower(obj.Name)
+        if string.find(n, "party", 1, true) or string.find(n, "squad", 1, true) then
+            if obj:IsA("StringValue") or obj:IsA("IntValue") or obj:IsA("NumberValue") then
+                if tostring(obj.Value) ~= "" then
+                    return tostring(obj.Value)
+                end
+            elseif obj:IsA("ObjectValue") and obj.Value then
+                return obj.Value
+            end
+        end
+    end
+
+    return nil
+end
+
+local function IsListedOrangePartyMember(OtherPlayer)
+    if not OtherPlayer then return false end
+    local key = NormalizePartyName(OtherPlayer.Name)
+    local display = NormalizePartyName(OtherPlayer.DisplayName)
+    return OrangePartyNames[key] == true or (display ~= "" and OrangePartyNames[display] == true)
+end
+
+local function IsPlayerInPartyUI(OtherPlayer)
+    if not OtherPlayer then return false end
+    local targetName = NormalizePartyName(OtherPlayer.Name)
+    local displayName = NormalizePartyName(OtherPlayer.DisplayName)
+    if targetName == "" then return false end
+
+    local gui = Player:FindFirstChildOfClass("PlayerGui")
+    if not gui then return false end
+
+    local function IsPartyContainer(obj)
+        local current = obj
+        for _ = 1, 5 do
+            if not current then break end
+            local n = string.lower(current.Name or "")
+            if string.find(n, "party", 1, true) or string.find(n, "squad", 1, true) then
+                return true
+            end
+            current = current.Parent
+        end
+        return false
+    end
+
+    for _, obj in ipairs(gui:GetDescendants()) do
+        if (obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox")) and IsPartyContainer(obj) then
+            local text = NormalizePartyName(obj.Text)
+            if text == targetName or (displayName ~= "" and text == displayName) then
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
+local function IsPlayerInMyParty(OtherPlayer)
+    if not OtherPlayer or OtherPlayer == Player then
+        return false
+    end
+
+    if IsListedOrangePartyMember(OtherPlayer) then
+        return true
+    end
+
+    local myPartyId = GetPartyId(Player)
+    local otherPartyId = GetPartyId(OtherPlayer)
+
+    if myPartyId ~= nil and otherPartyId ~= nil then
+        if typeof(myPartyId) == "Instance" and typeof(otherPartyId) == "Instance" then
+            return myPartyId == otherPartyId
+        end
+        return tostring(myPartyId) == tostring(otherPartyId)
+    end
+
+    -- Fallback for games where party membership is only represented in the local UI.
+    return IsPlayerInPartyUI(OtherPlayer)
+end
+
+local function AreOnSameTeam(OtherPlayer)
+	if not OtherPlayer or OtherPlayer == Player then
+		return false
+	end
+
+	-- Normal Roblox Team objects.
+	if Player.Team ~= nil and OtherPlayer.Team ~= nil then
+		return Player.Team == OtherPlayer.Team
+	end
+
+	-- Some games use TeamColor without assigning Team objects.
+	if Player.Neutral == false and OtherPlayer.Neutral == false then
+		return Player.TeamColor == OtherPlayer.TeamColor
+	end
+
+	return false
+end
+
+local function GetTeamESPColor(OtherPlayer)
+	if not OtherPlayer then
+		return GetESPColor()
+	end
+
+	-- Party members ALWAYS stay orange, even when Team Check also identifies them as teammates.
+	-- Orange has priority over blue.
+	if IsPlayerInMyParty(OtherPlayer) then
+		return TEAM_ORANGE
+	end
+
+	-- Only non-party teammates use the Team Check blue color.
+	if TeamCheckEnabled and AreOnSameTeam(OtherPlayer) then
+		return TEAM_BLUE
+	end
+
+	return GetESPColor()
+end
+
 local function RemoveESP(OtherPlayer)
 	local h = ESPHighlights[OtherPlayer]
 	if h then
@@ -1440,11 +1968,11 @@ local function RemoveESP(OtherPlayer)
 	end
 end
 
-local function UpdateHighlightVisual(h)
+local function UpdateHighlightVisual(h, OtherPlayer)
 	if not h then
 		return
 	end
-	local color = GetESPColor()
+	local color = GetTeamESPColor(OtherPlayer)
 	h.OutlineColor = color
 	h.FillColor = color
 	local t = math.clamp(OutlineThickness, 1, 10)
@@ -1478,7 +2006,7 @@ local function ApplyESP(OtherPlayer)
 		h.Name = "FIAS_ESP"
 		h.Adornee = Character
 		h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-		UpdateHighlightVisual(h)
+		UpdateHighlightVisual(h, OtherPlayer)
 		h.Parent = Character
 		return h
 	end)
@@ -1503,7 +2031,7 @@ end
 local function UpdateAllESPVisuals()
 	for OtherPlayer, h in pairs(ESPHighlights) do
 		if h and h.Parent then
-			UpdateHighlightVisual(h)
+			UpdateHighlightVisual(h, OtherPlayer)
 		elseif ESPEnabled then
 			ApplyESP(OtherPlayer)
 		end
@@ -1573,6 +2101,60 @@ Players.PlayerRemoving:Connect(function(OtherPlayer)
 	UnhookPlayer(OtherPlayer)
 end)
 
+Player:GetPropertyChangedSignal("Team"):Connect(function()
+	if ESPEnabled then
+		RefreshAllESP()
+	end
+end)
+
+for _, OtherPlayer in ipairs(Players:GetPlayers()) do
+	OtherPlayer:GetPropertyChangedSignal("Team"):Connect(function()
+		if ESPEnabled then
+			ApplyESP(OtherPlayer)
+		end
+	end)
+end
+
+Players.PlayerAdded:Connect(function(OtherPlayer)
+	OtherPlayer:GetPropertyChangedSignal("Team"):Connect(function()
+		if ESPEnabled then
+			ApplyESP(OtherPlayer)
+		end
+	end)
+end)
+
+local function HookPartyChanges(OtherPlayer)
+	if OtherPlayer == Player then return end
+	local function RefreshPartyESP()
+		if ESPEnabled then
+			ApplyESP(OtherPlayer)
+		end
+	end
+
+	for _, attributeName in ipairs({"PartyId", "PartyID", "partyId", "partyID", "Party", "party", "PartyCode", "PartyKey", "PartyGroup", "PartyNumber", "SquadId", "SquadID"}) do
+		OtherPlayer:GetAttributeChangedSignal(attributeName):Connect(RefreshPartyESP)
+	end
+
+	OtherPlayer.DescendantAdded:Connect(function(obj)
+		local n = string.lower(obj.Name)
+		if string.find(n, "party", 1, true) or string.find(n, "squad", 1, true) then
+			RefreshPartyESP()
+		end
+	end)
+	OtherPlayer.DescendantRemoving:Connect(function(obj)
+		local n = string.lower(obj.Name)
+		if string.find(n, "party", 1, true) or string.find(n, "squad", 1, true) then
+			RefreshPartyESP()
+		end
+	end)
+end
+
+HookPartyChanges(Player)
+for _, OtherPlayer in ipairs(Players:GetPlayers()) do
+	HookPartyChanges(OtherPlayer)
+end
+Players.PlayerAdded:Connect(HookPartyChanges)
+
 task.spawn(function()
 	while Window and Window.ScreenGui and Window.ScreenGui.Parent do
 		if ESPEnabled then
@@ -1601,6 +2183,18 @@ ESPToggle = ESP:CreateToggle(
 			RefreshAllESP()
 		else
 			ClearAllESP()
+		end
+		QueueSave()
+	end
+)
+
+TeamCheckToggle = ESP:CreateToggle(
+	"Team Check",
+	false,
+	function(Value)
+		TeamCheckEnabled = Value
+		if ESPEnabled then
+			RefreshAllESP()
 		end
 		QueueSave()
 	end
@@ -1949,8 +2543,9 @@ local function CollectSettings()
 		lockOnRadius = LockOnRadius,
 		lockOnSmooth = LockOnSmooth,
 		wallCheckEnabled = WallCheckEnabled,
-		ignoreUsername = IgnoreUsername,
+		ignoreUsernames = GetIgnoredUsernameList(),
 		espEnabled = ESPEnabled,
+		teamCheckEnabled = TeamCheckEnabled,
 		outlineThickness = OutlineThickness,
 		espBrightness = ESPBrightness,
 		espColorR = ESPColorR,
@@ -2050,12 +2645,37 @@ local function ApplySettings(data)
 		WallCheckToggle:SetState(false)
 	end
 
-	if type(data.ignoreUsername) == "string" then
-		IgnoreUsername = data.ignoreUsername
-		if IgnoreUsernameBox then
-			IgnoreUsernameBox.Text = IgnoreUsername
+	if type(data.ignoreUsernames) == "table" then
+		table.clear(IgnoredUsernames)
+		for _, Name in ipairs(data.ignoreUsernames) do
+			local Key = NormalizeUsername(Name)
+			if Key ~= "" then
+				IgnoredUsernames[Key] = true
+			end
 		end
+		if IgnoreUsernameBox then
+			IgnoreUsernameBox.Text = ""
+		end
+		RefreshIgnoredPlayerList()
+	elseif type(data.ignoreUsername) == "string" then
+		-- Backward compatibility with the old single-name setting.
+		table.clear(IgnoredUsernames)
+		local Key = NormalizeUsername(data.ignoreUsername)
+		if Key ~= "" then
+			IgnoredUsernames[Key] = true
+		end
+		if IgnoreUsernameBox then
+			IgnoreUsernameBox.Text = ""
+		end
+		RefreshIgnoredPlayerList()
 	end
+
+	if data.teamCheckEnabled == true and TeamCheckToggle then
+		TeamCheckToggle:SetState(true)
+	elseif data.teamCheckEnabled == false and TeamCheckToggle then
+		TeamCheckToggle:SetState(false)
+	end
+
 	if data.lockOnEnabled == true and LockOnToggle then
 		LockOnToggle:SetState(true)
 	elseif data.lockOnEnabled == false and LockOnToggle then
@@ -2207,6 +2827,12 @@ _G.__FIAS_OnDestroy = function()
 			WalkSpeedCharConnection:Disconnect()
 		end)
 		WalkSpeedCharConnection = nil
+	end
+	if WalkSpeedRenderConnection then
+		pcall(function()
+			WalkSpeedRenderConnection:Disconnect()
+		end)
+		WalkSpeedRenderConnection = nil
 	end
 
 	pcall(StopLockOn)

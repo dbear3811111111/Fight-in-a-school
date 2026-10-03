@@ -2146,6 +2146,373 @@ HealthBarToggle = ESP:CreateToggle(
 )
 
 --==================================================
+-- FARM TAB
+--==================================================
+
+local Farm = Window:CreateTab("Farm")
+
+Farm:CreateSection("Auto Farm Kills")
+
+local AutoFarmEnabled = false
+local AutoFarmRange = 200
+local AutoFarmAttackDelay = 0.12
+local AutoFarmStep = 18
+local AutoFarmThread = nil
+local AutoFarmHoldBehind = 3
+local AutoFarmFlySpeed = 60
+local AutoFarmNoclip = true
+local AutoFarmKillDelay = 3
+local AutoFarmResumeAt = 0
+local AutoFarmCurrentTarget = nil
+
+local function SetFarmNoclip(enabled)
+	local Character = Player.Character
+	if not Character then
+		return
+	end
+	for _, part in ipairs(Character:GetDescendants()) do
+		if part:IsA("BasePart") then
+			part.CanCollide = not enabled
+		end
+	end
+end
+
+local function StopAutoFarm()
+	AutoFarmEnabled = false
+	if AutoFarmThread then
+		pcall(function()
+			if typeof(AutoFarmThread) == "RBXScriptConnection" then
+				AutoFarmThread:Disconnect()
+			end
+		end)
+		AutoFarmThread = nil
+	end
+	-- Restore normal movement + collision
+	local Character = Player.Character
+	local Humanoid = Character and Character:FindFirstChildOfClass("Humanoid")
+	local Root = Character and Character:FindFirstChild("HumanoidRootPart")
+	if Humanoid then
+		Humanoid.PlatformStand = false
+	end
+	if Root then
+		Root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+	end
+	SetFarmNoclip(false)
+end
+
+local function IsFarmableTarget(OtherPlayer)
+	if not OtherPlayer or OtherPlayer == Player then
+		return false
+	end
+	if not OtherPlayer.Parent or not OtherPlayer.Character then
+		return false
+	end
+	local Humanoid = OtherPlayer.Character:FindFirstChildOfClass("Humanoid")
+	local Root = OtherPlayer.Character:FindFirstChild("HumanoidRootPart")
+	if not Humanoid or not Root then
+		return false
+	end
+	if Humanoid.Health <= 0 then
+		return false
+	end
+	-- Skip teammates if team check is on
+	if TeamCheckEnabled and Player.Team ~= nil and OtherPlayer.Team == Player.Team then
+		return false
+	end
+	return true
+end
+
+local function GetNearestFarmTarget()
+	local MyRoot = Player.Character and Player.Character:FindFirstChild("HumanoidRootPart")
+	if not MyRoot then
+		return nil
+	end
+
+	local Best = nil
+	local BestDist = math.huge
+
+	for _, OtherPlayer in ipairs(Players:GetPlayers()) do
+		if IsFarmableTarget(OtherPlayer) then
+			local Root = OtherPlayer.Character:FindFirstChild("HumanoidRootPart")
+			if Root then
+				local Dist = (MyRoot.Position - Root.Position).Magnitude
+				if Dist <= AutoFarmRange and Dist < BestDist then
+					BestDist = Dist
+					Best = OtherPlayer
+				end
+			end
+		end
+	end
+
+	return Best
+end
+
+local function FindFistTool()
+	local function isFist(tool)
+		if not tool or not tool:IsA("Tool") then
+			return false
+		end
+		local n = string.lower(tool.Name)
+		return n:find("fist")
+			or n:find("combat")
+			or n:find("hand")
+			or n:find("punch")
+			or n:find("melee")
+			or n == "fight"
+	end
+
+	local Character = Player.Character
+	if Character then
+		local equipped = Character:FindFirstChildOfClass("Tool")
+		if isFist(equipped) then
+			return equipped
+		end
+		for _, child in ipairs(Character:GetChildren()) do
+			if isFist(child) then
+				return child
+			end
+		end
+	end
+
+	local backpack = Player:FindFirstChildOfClass("Backpack")
+	if backpack then
+		for _, child in ipairs(backpack:GetChildren()) do
+			if isFist(child) then
+				return child
+			end
+		end
+		-- Fallback: first tool in backpack if no named fist found
+		for _, child in ipairs(backpack:GetChildren()) do
+			if child:IsA("Tool") then
+				return child
+			end
+		end
+	end
+	return nil
+end
+
+local function EquipFists()
+	local Character = Player.Character
+	local Humanoid = Character and Character:FindFirstChildOfClass("Humanoid")
+	if not Humanoid then
+		return
+	end
+
+	-- Already holding a tool
+	if Character:FindFirstChildOfClass("Tool") then
+		return
+	end
+
+	local fist = FindFistTool()
+	if fist then
+		pcall(function()
+			Humanoid:EquipTool(fist)
+		end)
+	end
+end
+
+local function MoveToward(targetRoot)
+	local Character = Player.Character
+	local Root = Character and Character:FindFirstChild("HumanoidRootPart")
+	local Humanoid = Character and Character:FindFirstChildOfClass("Humanoid")
+	if not Root or not targetRoot then
+		return
+	end
+
+	-- Noclip while farming so walls don't block the fly path
+	if AutoFarmNoclip then
+		SetFarmNoclip(true)
+	end
+
+	local goal = (targetRoot.CFrame * CFrame.new(0, 0, AutoFarmHoldBehind)).Position
+	local current = Root.Position
+	local offset = goal - current
+	local dist = offset.Magnitude
+
+	-- Face the target
+	local lookFlat = Vector3.new(targetRoot.Position.X, current.Y, targetRoot.Position.Z)
+	local lookCF = CFrame.new(current, lookFlat)
+
+	if dist <= 4 then
+		-- Arrived: equip fists, stop flying, soft hold
+		if Humanoid then
+			Humanoid.PlatformStand = false
+		end
+		Root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+		EquipFists()
+
+		if dist > 1.2 then
+			local nudge = current + offset.Unit * math.min(dist * 0.35, 1.5)
+			Root.CFrame = CFrame.new(nudge, lookFlat)
+		end
+	else
+		-- Fly toward target with velocity (no hard CFrame TP)
+		if Humanoid then
+			Humanoid.PlatformStand = true
+		end
+		local dir = offset.Unit
+		local speed = math.clamp(AutoFarmFlySpeed, 10, 200)
+		local vel = dir * math.min(speed, dist * 8)
+		Root.AssemblyLinearVelocity = vel
+		Root.CFrame = lookCF
+	end
+end
+
+local function TryAttack()
+	-- Prefer activating a Tool if equipped (fists / weapon)
+	local Character = Player.Character
+	if Character then
+		local tool = Character:FindFirstChildOfClass("Tool")
+		if tool then
+			pcall(function()
+				tool:Activate()
+			end)
+		end
+	end
+
+	-- Also simulate a left click for games that use mouse attack
+	pcall(function()
+		local VIM = game:GetService("VirtualInputManager")
+		if VIM then
+			VIM:SendMouseButtonEvent(0, 0, 0, true, game, 0)
+			task.wait(0.03)
+			VIM:SendMouseButtonEvent(0, 0, 0, false, game, 0)
+		end
+	end)
+end
+
+local function StartAutoFarm()
+	StopAutoFarm()
+	AutoFarmEnabled = true
+	AutoFarmResumeAt = 0
+	AutoFarmCurrentTarget = nil
+
+	local lastAttack = 0
+
+	AutoFarmThread = RunService.Heartbeat:Connect(function()
+		if not AutoFarmEnabled then
+			return
+		end
+
+		if os.clock() < AutoFarmResumeAt then
+			return
+		end
+
+		if AutoFarmCurrentTarget and AutoFarmCurrentTarget.Parent then
+			local oldCharacter = AutoFarmCurrentTarget.Character
+			local oldHumanoid = oldCharacter and oldCharacter:FindFirstChildOfClass("Humanoid")
+			if oldHumanoid and oldHumanoid.Health <= 0 then
+				AutoFarmCurrentTarget = nil
+				AutoFarmResumeAt = os.clock() + math.max(0, AutoFarmKillDelay)
+
+				local Character = Player.Character
+				local Humanoid = Character and Character:FindFirstChildOfClass("Humanoid")
+				local Root = Character and Character:FindFirstChild("HumanoidRootPart")
+				if Humanoid then Humanoid.PlatformStand = false end
+				if Root then Root.AssemblyLinearVelocity = Vector3.new(0, 0, 0) end
+				return
+			end
+		end
+
+		local target = GetNearestFarmTarget()
+		if not target or not target.Character then
+			return
+		end
+
+		local targetHumanoid = target.Character:FindFirstChildOfClass("Humanoid")
+		local targetRoot = target.Character:FindFirstChild("HumanoidRootPart")
+		if not targetHumanoid or not targetRoot or targetHumanoid.Health <= 0 then
+			return
+		end
+
+		AutoFarmCurrentTarget = target
+		MoveToward(targetRoot)
+
+		local now = os.clock()
+		if (now - lastAttack) >= math.max(0.05, AutoFarmAttackDelay) then
+			lastAttack = now
+			TryAttack()
+		end
+	end)
+end
+
+Farm:CreateToggle(
+	"Enable Auto Farm",
+	false,
+	function(Value)
+		if Value then
+			StartAutoFarm()
+		else
+			StopAutoFarm()
+		end
+		QueueSave()
+	end
+)
+
+Farm:CreateToggle(
+	"Noclip While Farming",
+	true,
+	function(Value)
+		AutoFarmNoclip = Value
+		if not Value then
+			SetFarmNoclip(false)
+		end
+		QueueSave()
+	end
+)
+
+Farm:CreateSlider(
+	"Farm Range",
+	10,
+	500,
+	200,
+	5,
+	function(Value)
+		AutoFarmRange = Value
+		QueueSave()
+	end
+)
+
+Farm:CreateSlider(
+	"Attack Delay (s)",
+	0.05,
+	1,
+	0.12,
+	0.01,
+	function(Value)
+		AutoFarmAttackDelay = Value
+		QueueSave()
+	end
+)
+
+Farm:CreateSlider(
+	"Fly Speed",
+	15,
+	150,
+	60,
+	5,
+	function(Value)
+		AutoFarmFlySpeed = Value
+		QueueSave()
+	end
+)
+
+Farm:CreateSlider(
+	"Kill Delay (s)",
+	0,
+	50,
+	3,
+	0.5,
+	function(Value)
+		AutoFarmKillDelay = Value
+		QueueSave()
+	end
+)
+
+Farm:CreateLabel("Flies to nearest player + auto attack.")
+Farm:CreateLabel("Kill Delay: waits after a target dies before flying again.")
+
+--==================================================
 -- MISC TAB
 --==================================================
 
@@ -2219,6 +2586,8 @@ local function CollectSettings()
 		espColorG = ESPColorG,
 		espColorB = ESPColorB,
 		healthBarEnabled = HealthBarEnabled,
+		tpTargetName = TPTargetName,
+		loopTPDelay = LoopTPDelay,
 		guiToggleKey = key and key.Name or nil
 	}
 end
@@ -2368,6 +2737,16 @@ local function ApplySettings(data)
 		end
 	end
 
+	if type(data.tpTargetName) == "string" then
+		TPTargetName = data.tpTargetName
+		if NameBox then
+			NameBox.Text = TPTargetName
+		end
+	end
+	if type(data.loopTPDelay) == "number" and TPDelaySlider then
+		TPDelaySlider:SetValue(data.loopTPDelay)
+	end
+
 	if data.autoSave == true then
 		AutoSaveEnabled = true
 	end
@@ -2503,6 +2882,10 @@ _G.__FIAS_OnDestroy = function()
 	end
 
 	pcall(StopLockOn)
+	pcall(StopLoopTP)
+	pcall(StopAutoFarm)
+	AutoFarmCurrentTarget = nil
+	AutoFarmResumeAt = 0
 
 	ESPEnabled = false
 	pcall(ClearAllESP)
